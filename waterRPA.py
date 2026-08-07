@@ -316,6 +316,16 @@ class RPAEngine:
         self.scaled_templates_cache = {}
 
         self.check_engine_status()
+        self.dx_camera = None
+        self.dxcam_available = False
+        try:
+            import dxcam
+            self.dx_camera = dxcam.create()
+            self.dxcam_available = True
+        except Exception as e:
+            self.dxcam_available = False
+            print(f"[RPAEngine] dxcam 初始化失败，将使用 pyautogui 截图回退: {e}")
+            write_log(f"dxcam 初始化失败: {e}")
         self.set_high_priority()
 
     def set_high_priority(self):
@@ -383,15 +393,128 @@ class RPAEngine:
         except Exception as e:
             write_log(f"预计算失败: {e}")
 
-    def find_target_optimized(self, img_path):
-        try:
-            screenshot_pil = pyautogui.screenshot(region=self.scan_region)
-        except: return None
+    def parse_coordinate(self, value):
+        """解析坐标输入，返回 (x, y) 或 None
+        支持格式: "100,200" 或 "100，200" 或 "(100,200)" 或 "100x200"
+        兼容中英文标点符号
+        """
+        if not value:
+            return None
         
+        value = str(value).strip()
+        if not value:
+            return None
+        
+        # 检查是否是文件路径
+        if os.path.exists(value):
+            return None
+        
+        # 检查是否是坐标格式
+        import re
+        
+        # 先标准化：将中文标点替换为英文
+        # 中文逗号 (，) -> 英文逗号 (,)
+        # 中文乘号 (×) -> 字母 x
+        # 全角逗号 (，) -> 英文逗号 (,)
+        normalized = value.replace('，', ',').replace('×', 'x').replace('✕', 'x').replace('X', 'x')
+        
+        # 匹配 X,Y 或 (X,Y) 格式（英文/中文逗号）
+        patterns = [
+            r'^\s*\(?\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)?\s*$',  # (100, 200) 或 100, 200
+            r'^\s*(-?\d+(?:\.\d+)?)\s*x\s*(-?\d+(?:\.\d+)?)\s*$',  # 100x200 或 100 x 200
+        ]
+        
+        for pattern in patterns:
+            match = re.match(pattern, normalized)
+            if match:
+                try:
+                    x = float(match.group(1))
+                    y = float(match.group(2))
+                    # 确保坐标是正数（屏幕坐标）
+                    if x >= 0 and y >= 0:
+                        return (int(x), int(y))
+                    # 负数坐标也允许（相对坐标）
+                    return (int(x), int(y))
+                except ValueError:
+                    continue
+        
+        return None
+
+    def parse_region(self, value):
+        """解析区域输入，返回 (region, path) 元组，region为(x, y, width, height)或None
+        支持格式: 
+        - "(100,200,300,400),保存路径/文件名"
+        - "(100,200,300,400)"
+        - "100,200,300,400,保存路径/文件名"
+        """
+        if not value:
+            return (None, None)
+        
+        value = str(value).strip()
+        if not value:
+            return (None, None)
+        
+        import re
+        
+        # 先标准化标点符号（中文逗号转英文逗号）
+        normalized = value.replace('，', ',')
+        
+        # 匹配格式：(x,y,width,height),保存路径
+        # 括号内是区域坐标，逗号后面是保存路径
+        pattern = r'^\s*\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)\s*,\s*(.+?)\s*$'
+        match = re.match(pattern, normalized)
+        if match:
+            try:
+                x = float(match.group(1))
+                y = float(match.group(2))
+                w = float(match.group(3))
+                h = float(match.group(4))
+                save_path = match.group(5).strip()
+                # 确保都是正数（屏幕区域）
+                if x >= 0 and y >= 0 and w >= 0 and h >= 0:
+                    return ((int(x), int(y), int(w), int(h)), save_path)
+            except ValueError:
+                pass
+        
+        # 匹配格式：(x,y,width,height) 只有区域，没有路径
+        pattern = r'^\s*\(\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*\)\s*$'
+        match = re.match(pattern, normalized)
+        if match:
+            try:
+                x = float(match.group(1))
+                y = float(match.group(2))
+                w = float(match.group(3))
+                h = float(match.group(4))
+                if x >= 0 and y >= 0 and w >= 0 and h >= 0:
+                    return ((int(x), int(y), int(w), int(h)), None)
+            except ValueError:
+                pass
+        
+        # 匹配格式：x,y,width,height,保存路径（无括号）
+        pattern = r'^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*,\s*(.+?)\s*$'
+        match = re.match(pattern, normalized)
+        if match:
+            try:
+                x = float(match.group(1))
+                y = float(match.group(2))
+                w = float(match.group(3))
+                h = float(match.group(4))
+                save_path = match.group(5).strip()
+                if x >= 0 and y >= 0 and w >= 0 and h >= 0:
+                    return ((int(x), int(y), int(w), int(h)), save_path)
+            except ValueError:
+                pass
+        
+        return (None, None)
+
+    def find_target_optimized(self, img_path):
         offset_x = self.scan_region[0] if self.scan_region else 0
         offset_y = self.scan_region[1] if self.scan_region else 0
 
         if not self.opencv_available:
+            try:
+                screenshot_pil = pyautogui.screenshot(region=self.scan_region)
+            except: return None
             if img_path in self.img_cache:
                 try: 
                     res = pyautogui.locate(self.img_cache[img_path], screenshot_pil, confidence=self.confidence)
@@ -413,8 +536,32 @@ class RPAEngine:
         import cv2
         import numpy as np
         
-        screen_np = np.array(screenshot_pil)
-        screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
+        # 使用 dxcam 截图（直接返回 numpy 数组，跳过 PIL 转换，速度更快）
+        if self.dxcam_available and self.dx_camera:
+            try:
+                if self.scan_region:
+                    x, y, w, h = self.scan_region
+                    frame = self.dx_camera.grab(region=(x, y, x + w, y + h))
+                else:
+                    frame = self.dx_camera.grab()
+                if frame is None:
+                    return None
+                screen_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            except:
+                # dxcam 失败时回退到 pyautogui
+                try:
+                    screenshot_pil = pyautogui.screenshot(region=self.scan_region)
+                    screen_np = np.array(screenshot_pil)
+                    screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
+                except:
+                    return None
+        else:
+            try:
+                screenshot_pil = pyautogui.screenshot(region=self.scan_region)
+            except:
+                return None
+            screen_np = np.array(screenshot_pil)
+            screen_gray = cv2.cvtColor(screen_np, cv2.COLOR_RGB2GRAY)
         
         if img_path not in self.img_cache:
             if os.path.exists(img_path):
@@ -460,6 +607,23 @@ class RPAEngine:
                 except: continue
         
         return None
+
+    def _dx_save_screenshot(self, path, region):
+        """使用 dxcam 保存截图，失败时回退到 pyautogui"""
+        if self.dxcam_available and self.dx_camera:
+            try:
+                import cv2
+                if region:
+                    x, y, w, h = region
+                    frame = self.dx_camera.grab(region=(x, y, x + w, y + h))
+                else:
+                    frame = self.dx_camera.grab()
+                if frame is not None:
+                    cv2.imwrite(path, cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                    return
+            except:
+                pass
+        pyautogui.screenshot(path, region=region)
 
     def mouseClick(self, clickTimes, lOrR, img_path, reTry):
         start_time = time.time()
@@ -549,7 +713,8 @@ class RPAEngine:
                         1.0: "左键单击", 2.0: "左键双击", 3.0: "右键单击", 
                         4.0: "输入文本", 5.0: "等待", 6.0: "滚轮滑动", 
                         7.0: "系统按键", 8.0: "鼠标悬停", 9.0: "截图保存",
-                        10.0: "比对", 11.0: "多条件检测"
+                        10.0: "比对", 11.0: "多条件检测", 12.0: "消失触发",
+                        13.0: "控件调用", 14.0: "图片条件分支", 15.0: "鼠标拖动"
                     }
                     
                     if callback_msg: callback_msg(f"执行步骤 {idx+1}/{len(tasks)}: {task_types.get(cmd, '未知')} -> {val}")
@@ -563,23 +728,42 @@ class RPAEngine:
                     
                     while not step_success and not self.check_stop_flag():
                         if cmd == 1.0: 
-                            result = self.mouseClick(1, "left", val, retry)
-                            if result:  # 返回True表示超时
-                                step_timeout = True
-                            else:
+                            # 支持坐标点击或图片识别点击
+                            coord = self.parse_coordinate(val)
+                            if coord:
+                                x, y = coord
+                                pyautogui.click(x, y, button='left')
                                 step_success = True
+                            else:
+                                result = self.mouseClick(1, "left", val, retry)
+                                if result:
+                                    step_timeout = True
+                                else:
+                                    step_success = True
                         elif cmd == 2.0: 
-                            result = self.mouseClick(2, "left", val, retry)
-                            if result:  # 返回True表示超时
-                                step_timeout = True
-                            else:
+                            coord = self.parse_coordinate(val)
+                            if coord:
+                                x, y = coord
+                                pyautogui.doubleClick(x, y, button='left')
                                 step_success = True
+                            else:
+                                result = self.mouseClick(2, "left", val, retry)
+                                if result:
+                                    step_timeout = True
+                                else:
+                                    step_success = True
                         elif cmd == 3.0: 
-                            result = self.mouseClick(1, "right", val, retry)
-                            if result:  # 返回True表示超时
-                                step_timeout = True
-                            else:
+                            coord = self.parse_coordinate(val)
+                            if coord:
+                                x, y = coord
+                                pyautogui.click(x, y, button='right')
                                 step_success = True
+                            else:
+                                result = self.mouseClick(1, "right", val, retry)
+                                if result:
+                                    step_timeout = True
+                                else:
+                                    step_success = True
                         elif cmd == 8.0:
                             loc = self.find_target_optimized(val)
                             if loc: 
@@ -610,11 +794,46 @@ class RPAEngine:
                             pyautogui.hotkey(*[k.strip() for k in str(val).lower().split('+')])
                             step_success = True
                         elif cmd == 9.0:
+                            # 截图保存功能：支持指定坐标区域
                             path = str(val)
-                            if os.path.isdir(path): path = os.path.join(path, time.strftime("ss_%H%M%S.png"))
-                            try: 
-                                pyautogui.screenshot(path, region=self.scan_region)
-                            except: 
+                            
+                            # 先尝试从输入中解析区域和路径
+                            input_region, input_path = self.parse_region(val)
+                            
+                            # 确定保存路径优先级：输入路径 > 自动生成
+                            if input_path:
+                                path = input_path
+                            elif input_region:
+                                path = time.strftime("ss_%H%M%S.png")
+                            elif os.path.isdir(path): 
+                                path = os.path.join(path, time.strftime("ss_%H%M%S.png"))
+                            
+                            try:
+                                step_region = task.get("screenshot_region", None)
+                                if callback_msg: 
+                                    if input_region:
+                                        callback_msg(f"📷 截图保存：使用指定坐标区域 {input_region}")
+                                    elif step_region:
+                                        callback_msg(f"📷 截图保存：使用步骤区域 {step_region}")
+                                    elif self.scan_region:
+                                        callback_msg(f"📷 截图保存：使用全局区域 {self.scan_region}")
+                                    else:
+                                        callback_msg(f"📷 截图保存：全屏截图")
+                                
+                                if input_region:
+                                    self._dx_save_screenshot(path, input_region)
+                                elif step_region:
+                                    self._dx_save_screenshot(path, step_region)
+                                elif self.scan_region:
+                                    self._dx_save_screenshot(path, self.scan_region)
+                                else:
+                                    self._dx_save_screenshot(path, None)
+                                
+                                if callback_msg: 
+                                    callback_msg(f"✅ 截图保存成功：{path}")
+                            except Exception as e: 
+                                if callback_msg: 
+                                    callback_msg(f"❌ 截图保存失败：{str(e)}")
                                 pass
                             step_success = True
                         elif cmd == 10.0:
@@ -689,6 +908,203 @@ class RPAEngine:
                                 except Exception as e:
                                     if callback_msg: callback_msg(f"❌ 多条件检测配置错误：{str(e)}")
                                     step_success = True
+                        elif cmd == 12.0:
+                            # 消失触发：检测图片元素，当所有/任一元素消失后进入下一步
+                            if self.check_stop_flag():
+                                return True
+                            
+                            # 检查超时
+                            if enable_timeout and self.timeout_val > 0:
+                                elapsed_time = time.time() - self.step_start_time
+                                if elapsed_time > self.timeout_val:
+                                    if callback_msg: callback_msg(f"⏰ 消失触发超时 ({elapsed_time:.1f}秒 > {self.timeout_val}秒)")
+                                    step_timeout = True
+                                
+                            if not step_timeout:
+                                try:
+                                    config = json.loads(str(val))
+                                    if isinstance(config, dict) and "images" in config:
+                                        images = config["images"]
+                                        logic = config.get("logic", "AND")
+                                    else:
+                                        images = [val]
+                                        logic = "AND"
+                                    
+                                    if not images:
+                                        if callback_msg: callback_msg(f"⚠️ 消失触发：未配置任何图片")
+                                        step_success = True
+                                    else:
+                                        vanish_count = 0
+                                        for img_path in images:
+                                            loc = self.find_target_optimized(img_path)
+                                            if not loc:
+                                                vanish_count += 1
+                                        
+                                        if logic == "AND":
+                                            # AND逻辑：所有图片都消失才进入下一步
+                                            if vanish_count == len(images):
+                                                if callback_msg: callback_msg(f"✅ 消失触发(AND)：所有 {len(images)} 个图片均已消失，进入下一步")
+                                                step_success = True
+                                            else:
+                                                if callback_msg: callback_msg(f"🎯 消失触发(AND)：已消失 {vanish_count}/{len(images)} 个图片，继续等待...")
+                                                step_success = False
+                                                time.sleep(0.8)
+                                        else:
+                                            # OR逻辑：只要有一个图片消失就进入下一步
+                                            if vanish_count > 0:
+                                                if callback_msg: callback_msg(f"✅ 消失触发(OR)：{vanish_count}/{len(images)} 个图片已消失，进入下一步")
+                                                step_success = True
+                                            else:
+                                                if callback_msg: callback_msg(f"🎯 消失触发(OR)：所有 {len(images)} 个图片仍存在，继续等待...")
+                                                step_success = False
+                                                time.sleep(0.8)
+                                except Exception as e:
+                                    # 兼容旧格式：单个图片路径
+                                    loc = self.find_target_optimized(val)
+                                    if loc:
+                                        if callback_msg: callback_msg(f"🎯 消失触发：元素存在，等待消失...")
+                                        step_success = False
+                                        time.sleep(0.8)
+                                    else:
+                                        # 图片消失，进入下一步
+                                        if callback_msg: callback_msg(f"✅ 消失触发：元素已消失，进入下一步")
+                                        step_success = True
+                        elif cmd == 13.0:
+                            # 控件调用：加载JSON文件并执行记录的操作
+                            import json as json_mod
+                            file_path = str(val)
+                            try:
+                                with open(file_path, 'r', encoding='utf-8') as f:
+                                    control_actions = json_mod.load(f)
+                                if callback_msg: callback_msg(f"📂 控件调用：加载 {len(control_actions)} 个操作")
+                                
+                                for act in control_actions:
+                                    if self.check_stop_flag():
+                                        return True
+                                    
+                                    # 等待间隔
+                                    interval = act.get('interval', 0)
+                                    if interval > 0:
+                                        time.sleep(interval / 1000.0)
+                                    
+                                    if act['type'] == 'mouse':
+                                        x, y = act['x'], act['y']
+                                        action_type = act.get('action', '左键单击')
+                                        if action_type == '左键单击':
+                                            pyautogui.click(x, y)
+                                        elif action_type == '右键单击':
+                                            pyautogui.rightClick(x, y)
+                                        elif action_type == '中键单击':
+                                            pyautogui.middleClick(x, y)
+                                        elif action_type == '左键双击':
+                                            pyautogui.doubleClick(x, y)
+                                        else:
+                                            pyautogui.click(x, y)
+                                        if callback_msg: callback_msg(f"  🖱️ {action_type} ({x}, {y})")
+                                    elif act['type'] == 'keyboard':
+                                        key = act.get('key', '')
+                                        pyautogui.press(key)
+                                        if callback_msg: callback_msg(f"  ⌨️ 按键: {key}")
+                                
+                                step_success = True
+                            except FileNotFoundError:
+                                if callback_msg: callback_msg(f"❌ 控件调用：文件不存在 {file_path}")
+                                step_success = True
+                            except Exception as e:
+                                if callback_msg: callback_msg(f"❌ 控件调用失败：{str(e)}")
+                                step_success = True
+                        elif cmd == 14.0:
+                            # 图片条件分支：检测图片，存在走成功分支，不存在走失败分支
+                            if self.check_stop_flag():
+                                return True
+                            try:
+                                config = json.loads(str(val)) if isinstance(val, str) else val
+                                if isinstance(config, str):
+                                    config = json.loads(config)
+                                image_path = config.get("image", "")
+                                max_wait = float(config.get("max_wait", 5))
+                                success_tasks = config.get("success_tasks", [])
+                                failure_tasks = config.get("failure_tasks", [])
+                            except Exception as e:
+                                if callback_msg: callback_msg(f"❌ 条件分支配置解析失败：{str(e)}")
+                                step_success = True
+                                continue
+                            
+                            if not image_path:
+                                if callback_msg: callback_msg(f"⚠️ 条件分支：未配置检测图片")
+                                step_success = True
+                                continue
+                            
+                            if callback_msg: callback_msg(f"🔀 条件分支：检测图片 {os.path.basename(image_path)}，等待 {max_wait} 秒")
+                            
+                            # 在等待时间内尝试查找图片
+                            found = False
+                            branch_start_time = time.time()
+                            while time.time() - branch_start_time < max_wait:
+                                if self.check_stop_flag():
+                                    return True
+                                loc = self.find_target_optimized(image_path)
+                                if loc:
+                                    found = True
+                                    break
+                                time.sleep(0.2)
+                            
+                            saved_is_running = self.is_running
+                            if found:
+                                if callback_msg: callback_msg(f"✅ 条件分支：图片存在，执行成功分支")
+                                if success_tasks:
+                                    self.run_tasks(success_tasks, False, callback_msg, enable_timeout=False)
+                                else:
+                                    if callback_msg: callback_msg(f"  成功分支无步骤，继续主流程")
+                            else:
+                                if callback_msg: callback_msg(f"❌ 条件分支：图片不存在，执行失败分支")
+                                if failure_tasks:
+                                    self.run_tasks(failure_tasks, False, callback_msg, enable_timeout=False)
+                                else:
+                                    if callback_msg: callback_msg(f"  失败分支无步骤，继续主流程")
+                            self.is_running = saved_is_running
+                            if callback_msg: callback_msg(f"🔀 条件分支完成，继续主流程")
+                            step_success = True
+                        elif cmd == 15.0:
+                            # 鼠标拖动：从起点拖动到终点
+                            if self.check_stop_flag():
+                                return True
+                            
+                            val_str = str(val)
+                            
+                            # 尝试解析坐标格式：start_x,start_y,end_x,end_y[,duration]
+                            import re
+                            coords = re.findall(r'-?\d+(?:\.\d+)?', val_str)
+                            
+                            if len(coords) >= 4:
+                                try:
+                                    sx, sy = float(coords[0]), float(coords[1])
+                                    ex, ey = float(coords[2]), float(coords[3])
+                                    duration = float(coords[4]) if len(coords) >= 5 else 0.2
+                                    
+                                    if callback_msg: callback_msg(f"🖱️ 鼠标拖动：({sx:.0f},{sy:.0f}) → ({ex:.0f},{ey:.0f}) 耗时{duration:.1f}秒")
+                                    pyautogui.moveTo(sx, sy)
+                                    pyautogui.drag(ex - sx, ey - sy, duration=duration)
+                                    step_success = True
+                                except Exception as e:
+                                    if callback_msg: callback_msg(f"❌ 鼠标拖动坐标执行失败：{str(e)}")
+                                    step_success = True
+                            else:
+                                # 图片模式：找图并从图片中心拖动
+                                if callback_msg: callback_msg(f"🖱️ 鼠标拖动（图片模式）：{os.path.basename(val_str)}")
+                                loc = self.find_target_optimized(val_str)
+                                if loc:
+                                    try:
+                                        sx, sy = loc
+                                        ex, ey = sx + 50, sy  # 默认向右拖动50像素
+                                        pyautogui.moveTo(sx, sy)
+                                        pyautogui.drag(ex - sx, ey - sy, duration=0.2)
+                                        if callback_msg: callback_msg(f"  ✅ 从 ({sx:.0f},{sy:.0f}) 拖动到 ({ex:.0f},{ey:.0f})")
+                                    except Exception as e:
+                                        if callback_msg: callback_msg(f"❌ 鼠标拖动图片模式失败：{str(e)}")
+                                else:
+                                    if callback_msg: callback_msg(f"⚠️ 鼠标拖动：未找到图片 {os.path.basename(val_str)}")
+                                step_success = True
                         
                         # 处理超时
                         if step_timeout and enable_timeout:
@@ -701,8 +1117,15 @@ class RPAEngine:
                                 # 有步骤级别的应对步骤
                                 if callback_msg: callback_msg(f"⏰ 步骤超时，执行步骤级应对步骤")
                                 saved_is_running = self.is_running
-                                # 设置最大执行时间限制（默认60秒），防止应对步骤无限执行
-                                max_response_time = float(getattr(self, 'max_response_time', 10.0))
+                                
+                                # 从步骤配置中获取应对步骤超时时间
+                                response_data = task.get("response_data", {})
+                                response_timeout_str = response_data.get("response_timeout", "100")
+                                try:
+                                    max_response_time = float(response_timeout_str) if float(response_timeout_str) > 0 else float('inf')
+                                except:
+                                    max_response_time = 100.0
+                                
                                 start_response_time = time.time()
                                 
                                 # 创建一个检查函数来限制应对步骤的执行时间
@@ -822,6 +1245,7 @@ class TaskRow(QFrame):
         
         self.delete_callback = delete_callback
         self.index = index
+        self.screenshot_region = None
         
         # 步骤序号
         self.index_label = QLabel(f"{index + 1}.")
@@ -830,7 +1254,7 @@ class TaskRow(QFrame):
         self.layout.addWidget(self.index_label)
         
         self.type_combo = QComboBox()
-        self.type_combo.addItems(["左键单击", "左键双击", "右键单击", "输入文本", "等待(秒)", "滚轮滑动", "系统按键", "鼠标悬停", "截图保存", "比对", "多条件检测"])
+        self.type_combo.addItems(["左键单击", "左键双击", "右键单击", "输入文本", "等待(秒)", "滚轮滑动", "系统按键", "鼠标悬停", "截图保存", "比对", "多条件检测", "消失触发", "控件调用", "鼠标拖动", "图片条件分支"])
         self.type_combo.currentTextChanged.connect(self.on_type_changed)
         self.layout.addWidget(self.type_combo)
         
@@ -880,33 +1304,126 @@ class TaskRow(QFrame):
             self.parent_item.setData(Qt.UserRole, self.get_data())
 
     def on_type_changed(self, text):
-        is_image_type = "单击" in text or "双击" in text or "悬停" in text or "截图" in text or "比对" in text
+        is_image_type = "单击" in text or "双击" in text or "悬停" in text or "截图" in text or "比对" in text or "消失触发" in text or "拖动" in text
         is_multi_condition = text == "多条件检测"
-        self.file_btn.setVisible(is_image_type)
+        is_vanish_trigger = text == "消失触发"
+        is_screenshot = text == "截图保存"
+        is_click_type = "单击" in text or "双击" in text
+        is_control_call = text == "控件调用"
+        is_condition_branch = text == "图片条件分支"
+        is_drag = text == "鼠标拖动"
+        
+        self.file_btn.setVisible((is_image_type and not is_screenshot and not is_multi_condition and not is_vanish_trigger and not is_condition_branch) or is_control_call)
+        
+        if is_screenshot:
+            if not hasattr(self, 'region_btn'):
+                self.region_btn = QPushButton("📍 选区域")
+                self.region_btn.clicked.connect(self.select_screenshot_region)
+                self.layout.insertWidget(4, self.region_btn)
+            self.region_btn.show()
+            self.value_input.setPlaceholderText("保存路径 或 (x,y,w,h),保存路径(如: (100,200,300,400),test.png)")
+        elif is_click_type:
+            if hasattr(self, 'region_btn'):
+                self.region_btn.hide()
+            self.value_input.setPlaceholderText("图片路径 或 坐标(如: 100,200 或 100，200)")
+        elif is_control_call:
+            if hasattr(self, 'region_btn'):
+                self.region_btn.hide()
+            self.value_input.setPlaceholderText("控件操作JSON文件路径")
+        elif is_condition_branch:
+            if hasattr(self, 'region_btn'):
+                self.region_btn.hide()
+            self.value_input.setPlaceholderText("检测的图片路径（自动生成配置）")
+            self.file_btn.setVisible(True)
+            if not hasattr(self, 'branch_config_btn'):
+                self.branch_config_btn = QPushButton("🔀 配置分支")
+                self.branch_config_btn.clicked.connect(self.open_branch_config)
+                self.layout.insertWidget(4, self.branch_config_btn)
+            self.branch_config_btn.show()
+        elif is_drag:
+            if hasattr(self, 'region_btn'):
+                self.region_btn.hide()
+            if hasattr(self, 'branch_config_btn'):
+                self.branch_config_btn.hide()
+            self.value_input.setPlaceholderText("起点x,起点y,终点x,终点y 或 图片路径")
+        else:
+            if hasattr(self, 'region_btn'):
+                self.region_btn.hide()
+            self.value_input.setPlaceholderText("参数")
+        
         if is_multi_condition:
             self.file_btn.setVisible(False)
-            # 如果是多条件检测类型，添加配置按钮
             if not hasattr(self, 'multi_condition_btn'):
                 self.multi_condition_btn = QPushButton("🔧 配置")
                 self.multi_condition_btn.clicked.connect(self.open_multi_condition_config)
                 self.layout.insertWidget(4, self.multi_condition_btn)
+            self.multi_condition_btn.show()
+            if hasattr(self, 'vanish_trigger_btn'):
+                self.vanish_trigger_btn.hide()
+            if hasattr(self, 'branch_config_btn'):
+                self.branch_config_btn.hide()
+        elif is_vanish_trigger:
+            self.file_btn.setVisible(False)
+            if not hasattr(self, 'vanish_trigger_btn'):
+                self.vanish_trigger_btn = QPushButton("🔧 配置")
+                self.vanish_trigger_btn.clicked.connect(self.open_vanish_trigger_config)
+                self.layout.insertWidget(4, self.vanish_trigger_btn)
+            self.vanish_trigger_btn.show()
+            if hasattr(self, 'multi_condition_btn'):
+                self.multi_condition_btn.hide()
+            if hasattr(self, 'branch_config_btn'):
+                self.branch_config_btn.hide()
+        elif is_condition_branch:
+            if hasattr(self, 'multi_condition_btn'):
+                self.multi_condition_btn.hide()
+            if hasattr(self, 'vanish_trigger_btn'):
+                self.vanish_trigger_btn.hide()
+        elif is_drag:
+            if hasattr(self, 'multi_condition_btn'):
+                self.multi_condition_btn.hide()
+            if hasattr(self, 'vanish_trigger_btn'):
+                self.vanish_trigger_btn.hide()
+            if hasattr(self, 'branch_config_btn'):
+                self.branch_config_btn.hide()
         else:
             if hasattr(self, 'multi_condition_btn'):
                 self.multi_condition_btn.hide()
+            if hasattr(self, 'vanish_trigger_btn'):
+                self.vanish_trigger_btn.hide()
+            if hasattr(self, 'branch_config_btn'):
+                self.branch_config_btn.hide()
         self.sync_data()
             
     def set_data(self, data):
         self.value_input.setText(str(data.get("value", "")))
-        TYPES_REV = {1.0: "左键单击", 2.0: "左键双击", 3.0: "右键单击", 4.0: "输入文本", 5.0: "等待(秒)", 6.0: "滚轮滑动", 7.0: "系统按键", 8.0: "鼠标悬停", 9.0: "截图保存", 10.0: "比对", 11.0: "多条件检测"}
+        TYPES_REV = {1.0: "左键单击", 2.0: "左键双击", 3.0: "右键单击", 4.0: "输入文本", 5.0: "等待(秒)", 6.0: "滚轮滑动", 7.0: "系统按键", 8.0: "鼠标悬停", 9.0: "截图保存", 10.0: "比对", 11.0: "多条件检测", 12.0: "消失触发", 13.0: "控件调用", 14.0: "图片条件分支", 15.0: "鼠标拖动"}
         t = data.get("type", 1.0)
         if t in TYPES_REV:
             self.type_combo.setCurrentText(TYPES_REV[t])
-        # 确保多条件检测按钮显示
+        
+        if t == 9.0:
+            self.screenshot_region = data.get("screenshot_region", None)
+            if self.screenshot_region and hasattr(self, 'region_btn'):
+                x, y, w, h = self.screenshot_region
+                self.region_btn.setText(f"📍 {w}x{h}")
+        
         if t == 11.0:
             self.on_type_changed("多条件检测")
-        # 保存应对步骤配置
+        elif t == 12.0:
+            self.on_type_changed("消失触发")
+        elif t == 14.0:
+            self.on_type_changed("图片条件分支")
+            # 从 value 中解析分支配置
+            val_str = str(data.get("value", ""))
+            if val_str:
+                try:
+                    parsed = json.loads(val_str)
+                    if isinstance(parsed, dict):
+                        self.branch_data = parsed
+                except:
+                    self.branch_data = {"image": val_str, "max_wait": 5, "success_tasks": [], "failure_tasks": []}
+        
         self.response_data = data.get("response_data", {})
-        # 更新应对按钮显示
         self.update_response_btn_display()
     
     def open_multi_condition_config(self):
@@ -914,9 +1431,143 @@ class TaskRow(QFrame):
         dialog = MultiConditionConfigDialog(self)
         dialog.exec_()
     
+    def open_vanish_trigger_config(self):
+        """打开消失触发配置对话框"""
+        dialog = VanishTriggerConfigDialog(self)
+        dialog.exec_()
+    
     def select_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择", filter="Images (*.png *.jpg *.bmp)")
-        if path: self.value_input.setText(path)
+        if self.type_combo.currentText() == "控件调用":
+            filter_text = "JSON文件 (*.json)"
+        else:
+            filter_text = "Images (*.png *.jpg *.bmp)"
+        path, _ = QFileDialog.getOpenFileName(self, "选择", filter=filter_text)
+        if path:
+            self.value_input.setText(path)
+            if self.type_combo.currentText() == "图片条件分支":
+                # 把选中的图片同步到 branch_data
+                branch_data = getattr(self, 'branch_data', {})
+                branch_data["image"] = path
+                self.branch_data = branch_data
+    
+    def select_screenshot_region(self):
+        """选择截图区域并保存到配置中"""
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtCore import QEventLoop, Signal
+        
+        write_log("开始选择截图区域...")
+        
+        class ScreenshotRegionSelector(QWidget):
+            closed = Signal()
+            
+            def __init__(self):
+                super().__init__()
+                self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+                self.setAttribute(Qt.WA_TranslucentBackground)
+                self.setCursor(Qt.CrossCursor)
+                self.setMouseTracking(True)
+                virtual_rect = QApplication.primaryScreen().virtualGeometry()
+                self.setGeometry(virtual_rect)
+                
+                phys_w, phys_h = pyautogui.size()
+                log_w = virtual_rect.width()
+                log_h = virtual_rect.height()
+                self.scale_x = phys_w / log_w
+                self.scale_y = phys_h / log_h
+                
+                self.start_point = None
+                self.end_point = None
+                self.selected_region = None
+                self.show()
+            
+            def paintEvent(self, event):
+                painter = QPainter(self)
+                painter.setRenderHint(QPainter.Antialiasing)
+                bg_color = QColor(0, 0, 0, 100)
+                
+                if self.start_point and self.end_point:
+                    rect = QRect(self.start_point, self.end_point).normalized()
+                    mask_region = QRegion(self.rect())
+                    selection_region = QRegion(rect)
+                    overlay_region = mask_region.subtracted(selection_region)
+                    painter.setClipRegion(overlay_region)
+                    painter.fillRect(self.rect(), bg_color)
+                    
+                    painter.setClipping(False)
+                    pen = QPen(QColor(0, 255, 0), 2)
+                    pen.setStyle(Qt.DashLine)
+                    painter.setPen(pen)
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawRect(rect)
+                    
+                    real_w = int(rect.width() * self.scale_x)
+                    real_h = int(rect.height() * self.scale_y)
+                    info_text = f"选区:{rect.width()}x{rect.height()} (实际: {real_w}x{real_h})"
+                    painter.setPen(QColor(255, 255, 255))
+                    painter.setFont(QFont("Arial", 12, QFont.Bold))
+                    text_y = rect.y() - 10
+                    if text_y < 30: text_y = rect.y() + 30
+                    painter.drawText(rect.x(), text_y, info_text)
+                else:
+                    painter.fillRect(self.rect(), bg_color)
+                    painter.setPen(QColor(255, 255, 255))
+                    painter.setFont(QFont("Arial", 16, QFont.Bold))
+                    hint = "请框选截图区域 | 左键拖动选择 | 右键取消"
+                    fm = painter.fontMetrics()
+                    tw = fm.horizontalAdvance(hint)
+                    painter.drawText((self.width() - tw)//2, 100, hint)
+            
+            def mousePressEvent(self, event):
+                if event.button() == Qt.LeftButton:
+                    self.start_point = event.pos()
+                    self.end_point = None
+                    self.update()
+                elif event.button() == Qt.RightButton:
+                    self.selected_region = None
+                    self.close()
+            
+            def mouseMoveEvent(self, event):
+                if self.start_point:
+                    self.end_point = event.pos()
+                    self.update()
+            
+            def mouseReleaseEvent(self, event):
+                if event.button() == Qt.LeftButton and self.start_point and self.end_point:
+                    rect = QRect(self.start_point, self.end_point).normalized()
+                    if rect.width() > 10 and rect.height() > 10:
+                        x = int(rect.x() * self.scale_x)
+                        y = int(rect.y() * self.scale_y)
+                        w = int(rect.width() * self.scale_x)
+                        h = int(rect.height() * self.scale_y)
+                        self.selected_region = (x, y, w, h)
+                    self.close()
+            
+            def closeEvent(self, event):
+                self.closed.emit()
+                event.accept()
+        
+        selector = ScreenshotRegionSelector()
+        loop = QEventLoop()
+        
+        selector.closed.connect(loop.quit)
+        
+        loop.exec()
+        
+        result_region = selector.selected_region
+        
+        selector.deleteLater()
+        
+        if result_region:
+            self.screenshot_region = result_region
+            write_log(f"截图区域选择成功: {self.screenshot_region}")
+            if hasattr(self, 'region_btn'):
+                x, y, w, h = result_region
+                self.region_btn.setText(f"📍 {w}x{h}")
+        else:
+            self.screenshot_region = None
+            write_log("截图区域选择取消或未选择")
+            if hasattr(self, 'region_btn'):
+                self.region_btn.setText("📍 选区域")
     
     def update_response_btn_display(self):
         """更新应对按钮的可视化显示"""
@@ -947,11 +1598,27 @@ class TaskRow(QFrame):
             self.response_btn.setToolTip("点击配置应对步骤")
     
     def get_data(self):
-        TYPES = {"左键单击": 1.0, "左键双击": 2.0, "右键单击": 3.0, "输入文本": 4.0, "等待(秒)": 5.0, "滚轮滑动": 6.0, "系统按键": 7.0, "鼠标悬停": 8.0, "截图保存": 9.0, "比对": 10.0, "多条件检测": 11.0}
+        TYPES = {"左键单击": 1.0, "左键双击": 2.0, "右键单击": 3.0, "输入文本": 4.0, "等待(秒)": 5.0, "滚轮滑动": 6.0, "系统按键": 7.0, "鼠标悬停": 8.0, "截图保存": 9.0, "比对": 10.0, "多条件检测": 11.0, "消失触发": 12.0, "控件调用": 13.0, "图片条件分支": 14.0, "鼠标拖动": 15.0}
         val = self.value_input.text()
         t = TYPES.get(self.type_combo.currentText(), 1.0)
         if t in [5.0, 6.0] and not val: val = "0"
-        return {"type": t, "value": val, "response_data": getattr(self, 'response_data', {})}
+        
+        data = {"type": t, "value": val, "response_data": getattr(self, 'response_data', {})}
+        
+        if t == 9.0:
+            region = getattr(self, 'screenshot_region', None)
+            data["screenshot_region"] = region
+            write_log(f"截图保存步骤 - get_data: screenshot_region={region}")
+        
+        if t == 14.0:
+            # 将分支配置序列化为 JSON 存入 value
+            branch_data = getattr(self, 'branch_data', {})
+            if branch_data:
+                data["value"] = json.dumps(branch_data, ensure_ascii=False)
+            else:
+                data["value"] = val
+        
+        return data
     
     def open_response_config(self):
         """打开应对步骤配置对话框"""
@@ -959,6 +1626,15 @@ class TaskRow(QFrame):
         dialog.exec_()
         # 对话框关闭后更新按钮显示
         self.update_response_btn_display()
+    
+    def open_branch_config(self):
+        """打开图片条件分支配置对话框"""
+        dialog = ConditionBranchConfigDialog(self)
+        dialog.exec_()
+        # 对话框关闭后更新 value 显示
+        branch_data = getattr(self, 'branch_data', {})
+        if branch_data.get("image"):
+            self.value_input.setText(branch_data.get("image", ""))
 
 class DraggableListWidget(QListWidget):
     def __init__(self, parent=None):
@@ -975,6 +1651,132 @@ class DraggableListWidget(QListWidget):
                 data = item.data(Qt.UserRole)
                 if data:
                     self.window().restore_row_widget(item, data)
+
+class VanishTriggerConfigDialog(QDialog):
+    """消失触发配置对话框"""
+    def __init__(self, parent_row):
+        super().__init__()
+        self.parent_row = parent_row
+        self.setWindowTitle("🎯 消失触发配置")
+        self.resize(600, 550)
+        self.setStyleSheet("QDialog { background-color: #f8f9fa; }")
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        logic_group = QGroupBox("🔧 检测逻辑")
+        logic_layout = QVBoxLayout(logic_group)
+        
+        logic_label = QLabel("选择多个图片之间的检测逻辑：")
+        logic_layout.addWidget(logic_label)
+        
+        self.logic_combo = QComboBox()
+        self.logic_combo.addItems(["AND 逻辑", "OR 逻辑"])
+        self.logic_combo.setStyleSheet("padding: 5px; min-width: 150px;")
+        logic_layout.addWidget(self.logic_combo)
+        
+        logic_desc = QLabel()
+        logic_desc.setStyleSheet("font-size: 12px; color: #666;")
+        logic_desc.setText("""
+        <ul>
+        <li><b>AND 逻辑</b>：所有图片都消失才进入下一步（全部消失）</li>
+        <li><b>OR 逻辑</b>：只要有一个图片消失就进入下一步（任一消失）</li>
+        </ul>
+        """)
+        logic_layout.addWidget(logic_desc)
+        layout.addWidget(logic_group)
+        
+        title_group = QGroupBox("📋 监控图片列表")
+        title_layout = QVBoxLayout(title_group)
+        
+        title_label = QLabel("配置需要监控消失的图片列表")
+        title_label.setWordWrap(True)
+        title_layout.addWidget(title_label)
+        
+        self.image_list = QListWidget()
+        self.image_list.setStyleSheet("background-color: white; border: 1px solid #ddd; border-radius: 4px;")
+        title_layout.addWidget(self.image_list)
+        
+        btn_layout = QHBoxLayout()
+        add_img_btn = QPushButton("➕ 添加图片")
+        add_img_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 5px 15px; border-radius: 4px;")
+        add_img_btn.clicked.connect(self.add_image)
+        btn_layout.addWidget(add_img_btn)
+        
+        del_img_btn = QPushButton("🗑️ 删除选中")
+        del_img_btn.setStyleSheet("background-color: #f44336; color: white; padding: 5px 15px; border-radius: 4px;")
+        del_img_btn.clicked.connect(self.delete_image)
+        btn_layout.addWidget(del_img_btn)
+        
+        btn_layout.addStretch()
+        title_layout.addLayout(btn_layout)
+        
+        layout.addWidget(title_group)
+        
+        dialog_btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("✅ 确定")
+        ok_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 8px 25px; border-radius: 4px; font-weight: bold;")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("❌ 取消")
+        cancel_btn.setStyleSheet("background-color: #f0f0f0; color: #333; padding: 8px 25px; border-radius: 4px;")
+        cancel_btn.clicked.connect(self.reject)
+        dialog_btn_layout.addStretch()
+        dialog_btn_layout.addWidget(ok_btn)
+        dialog_btn_layout.addWidget(cancel_btn)
+        layout.addLayout(dialog_btn_layout)
+        
+        self.load_data()
+    
+    def load_data(self):
+        self.image_list.clear()
+        data = self.parent_row.get_data()
+        if data.get("type") == 12.0:
+            value_str = data.get("value", "")
+            if value_str:
+                try:
+                    config = json.loads(value_str)
+                    if isinstance(config, dict) and "images" in config:
+                        images = config["images"]
+                        logic = config.get("logic", "AND")
+                        self.logic_combo.setCurrentIndex(0 if logic == "AND" else 1)
+                    else:
+                        images = config
+                        self.logic_combo.setCurrentIndex(0)
+                    
+                    for img_path in images:
+                        item = QListWidgetItem(os.path.basename(img_path))
+                        item.setData(Qt.UserRole, img_path)
+                        self.image_list.addItem(item)
+                except:
+                    pass
+    
+    def add_image(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择图片", filter="Images (*.png *.jpg *.bmp)")
+        if path:
+            item = QListWidgetItem(os.path.basename(path))
+            item.setData(Qt.UserRole, path)
+            self.image_list.addItem(item)
+    
+    def delete_image(self):
+        current_item = self.image_list.currentItem()
+        if current_item:
+            self.image_list.takeItem(self.image_list.row(current_item))
+    
+    def accept(self):
+        images = []
+        for i in range(self.image_list.count()):
+            item = self.image_list.item(i)
+            images.append(item.data(Qt.UserRole))
+        
+        logic = "AND" if self.logic_combo.currentIndex() == 0 else "OR"
+        
+        config = {
+            "logic": logic,
+            "images": images
+        }
+        self.parent_row.value_input.setText(json.dumps(config, ensure_ascii=False))
+        super().accept()
 
 class MultiConditionConfigDialog(QDialog):
     """多条件检测配置对话框"""
@@ -1167,6 +1969,28 @@ class ResponseConfigDialog(QDialog):
         steps_layout.addLayout(toolbar)
         layout.addWidget(steps_box)
         
+        # 应对步骤超时时间配置
+        timeout_box = QGroupBox("⏱️ 应对步骤超时时间")
+        timeout_layout = QHBoxLayout(timeout_box)
+        
+        timeout_label = QLabel("最大执行时间:")
+        timeout_layout.addWidget(timeout_label)
+        
+        self.response_timeout_edit = QLineEdit()
+        self.response_timeout_edit.setPlaceholderText("100")
+        self.response_timeout_edit.setFixedWidth(80)
+        timeout_layout.addWidget(self.response_timeout_edit)
+        
+        timeout_unit = QLabel("秒 (0=不限制)")
+        timeout_layout.addWidget(timeout_unit)
+        timeout_layout.addStretch()
+        
+        timeout_hint = QLabel("设置应对步骤的最大执行时间，超过此时间将终止执行并视为失败")
+        timeout_hint.setStyleSheet("color: #888; font-size: 11px;")
+        timeout_layout.addWidget(timeout_hint)
+        
+        layout.addWidget(timeout_box)
+        
         # 超时后动作区域
         action_box = QGroupBox("🎯 超时后动作（应对失败时执行）")
         action_layout = QVBoxLayout(action_box)
@@ -1218,10 +2042,14 @@ class ResponseConfigDialog(QDialog):
         response_data = getattr(self.parent_row, 'response_data', {})
         response_tasks = response_data.get("tasks", [])
         timeout_action = response_data.get("timeout_action", "retry")
+        response_timeout = response_data.get("response_timeout", "100")
         
         # 设置超时动作
         action_index = {"retry": 0, "skip": 1, "restart": 2}.get(timeout_action, 0)
         self.timeout_action_combo.setCurrentIndex(action_index)
+        
+        # 设置应对步骤超时时间
+        self.response_timeout_edit.setText(str(response_timeout))
         
         for task in response_tasks:
             item = QListWidgetItem()
@@ -1260,12 +2088,177 @@ class ResponseConfigDialog(QDialog):
         action_index = self.timeout_action_combo.currentIndex()
         timeout_action = ["retry", "skip", "restart"][action_index]
         
+        # 保存应对步骤超时时间
+        response_timeout = self.response_timeout_edit.text() or "100"
+        
         self.parent_row.response_data = {
             "tasks": response_tasks,
-            "timeout_action": timeout_action
+            "timeout_action": timeout_action,
+            "response_timeout": response_timeout
         }
         self.parent_row.sync_data()
         super().accept()
+
+
+class ConditionBranchConfigDialog(QDialog):
+    """图片条件分支配置对话框"""
+    def __init__(self, parent_row):
+        super().__init__()
+        self.parent_row = parent_row
+        self.setWindowTitle("🔀 图片条件分支配置")
+        self.resize(600, 550)
+        self.setStyleSheet("QDialog { background-color: #f8f9fa; }")
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        # 图片路径
+        image_group = QGroupBox("📷 检测图片")
+        image_layout = QHBoxLayout(image_group)
+        self.image_path_edit = QLineEdit()
+        self.image_path_edit.setPlaceholderText("选择要检测的图片路径...")
+        image_layout.addWidget(self.image_path_edit)
+        browse_btn = QPushButton("📂 浏览")
+        browse_btn.clicked.connect(self.browse_image)
+        image_layout.addWidget(browse_btn)
+        layout.addWidget(image_group)
+        
+        # 最大等待时间
+        timeout_group = QGroupBox("⏱️ 等待时间")
+        timeout_layout = QHBoxLayout(timeout_group)
+        timeout_label = QLabel("最大等待时间（秒）：")
+        timeout_layout.addWidget(timeout_label)
+        self.max_wait_edit = QLineEdit()
+        self.max_wait_edit.setPlaceholderText("5")
+        self.max_wait_edit.setFixedWidth(80)
+        timeout_layout.addWidget(self.max_wait_edit)
+        timeout_layout.addStretch()
+        timeout_desc = QLabel("超过此时间未找到图片将进入失败分支")
+        timeout_desc.setStyleSheet("color: #888; font-size: 11px;")
+        timeout_layout.addWidget(timeout_desc)
+        layout.addWidget(timeout_group)
+        
+        # 成功分支
+        success_group = QGroupBox("✅ 成功分支（图片存在时执行）")
+        success_layout = QVBoxLayout(success_group)
+        self.success_task_list = QListWidget()
+        self.success_task_list.setStyleSheet("background-color: white; border: 1px solid #ddd; border-radius: 4px; min-height: 120px;")
+        success_layout.addWidget(self.success_task_list)
+        success_toolbar = QHBoxLayout()
+        add_success_btn = QPushButton("➕ 添加步骤")
+        add_success_btn.setStyleSheet("background-color: #4CAF50; color: white; padding: 4px 12px; border-radius: 4px;")
+        add_success_btn.clicked.connect(lambda: self.add_step(self.success_task_list))
+        success_toolbar.addWidget(add_success_btn)
+        success_toolbar.addStretch()
+        success_layout.addLayout(success_toolbar)
+        layout.addWidget(success_group)
+        
+        # 失败分支
+        failure_group = QGroupBox("❌ 失败分支（图片不存在时执行）")
+        failure_layout = QVBoxLayout(failure_group)
+        self.failure_task_list = QListWidget()
+        self.failure_task_list.setStyleSheet("background-color: white; border: 1px solid #ddd; border-radius: 4px; min-height: 120px;")
+        failure_layout.addWidget(self.failure_task_list)
+        failure_toolbar = QHBoxLayout()
+        add_failure_btn = QPushButton("➕ 添加步骤")
+        add_failure_btn.setStyleSheet("background-color: #FF9800; color: white; padding: 4px 12px; border-radius: 4px;")
+        add_failure_btn.clicked.connect(lambda: self.add_step(self.failure_task_list))
+        failure_toolbar.addWidget(add_failure_btn)
+        failure_toolbar.addStretch()
+        failure_layout.addLayout(failure_toolbar)
+        layout.addWidget(failure_group)
+        
+        # 确定/取消按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        ok_btn = QPushButton("✅ 确定")
+        ok_btn.setStyleSheet("background-color: #2196F3; color: white; padding: 8px 25px; border-radius: 4px; font-weight: bold;")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("❌ 取消")
+        cancel_btn.setStyleSheet("background-color: #f0f0f0; color: #333; padding: 8px 25px; border-radius: 4px;")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+        
+        # 加载已有配置
+        self.load_data()
+    
+    def browse_image(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择图片", filter="Images (*.png *.jpg *.bmp)")
+        if path:
+            self.image_path_edit.setText(path)
+    
+    def add_step(self, task_list):
+        default_task = {"type": 5.0, "value": "2"}
+        item = QListWidgetItem()
+        item.setSizeHint(QSize(0, 40))
+        row_widget = TaskRow(delete_callback=lambda w: self.del_step(task_list, w), data=default_task)
+        task_list.addItem(item)
+        task_list.setItemWidget(item, row_widget)
+    
+    def del_step(self, task_list, row_widget):
+        for i in range(task_list.count()):
+            item = task_list.item(i)
+            if task_list.itemWidget(item) == row_widget:
+                task_list.takeItem(i)
+                break
+    
+    def load_data(self):
+        """加载已有配置"""
+        branch_data = getattr(self.parent_row, 'branch_data', {})
+        if branch_data:
+            self.image_path_edit.setText(branch_data.get("image", ""))
+            self.max_wait_edit.setText(str(branch_data.get("max_wait", 5)))
+            # 加载成功步骤
+            for task in branch_data.get("success_tasks", []):
+                item = QListWidgetItem()
+                item.setSizeHint(QSize(0, 40))
+                row_widget = TaskRow(delete_callback=lambda w: self.del_step(self.success_task_list, w), data=task)
+                self.success_task_list.addItem(item)
+                self.success_task_list.setItemWidget(item, row_widget)
+            # 加载失败步骤
+            for task in branch_data.get("failure_tasks", []):
+                item = QListWidgetItem()
+                item.setSizeHint(QSize(0, 40))
+                row_widget = TaskRow(delete_callback=lambda w: self.del_step(self.failure_task_list, w), data=task)
+                self.failure_task_list.addItem(item)
+                self.failure_task_list.setItemWidget(item, row_widget)
+    
+    def accept(self):
+        """保存分支配置"""
+        # 收集成功步骤
+        success_tasks = []
+        for i in range(self.success_task_list.count()):
+            item = self.success_task_list.item(i)
+            widget = self.success_task_list.itemWidget(item)
+            if widget:
+                success_tasks.append(widget.get_data())
+        
+        # 收集失败步骤
+        failure_tasks = []
+        for i in range(self.failure_task_list.count()):
+            item = self.failure_task_list.item(i)
+            widget = self.failure_task_list.itemWidget(item)
+            if widget:
+                failure_tasks.append(widget.get_data())
+        
+        max_wait_str = self.max_wait_edit.text().strip()
+        try:
+            max_wait = float(max_wait_str) if max_wait_str else 5.0
+        except:
+            max_wait = 5.0
+        
+        self.parent_row.branch_data = {
+            "image": self.image_path_edit.text(),
+            "max_wait": max_wait,
+            "success_tasks": success_tasks,
+            "failure_tasks": failure_tasks
+        }
+        self.parent_row.sync_data()
+        super().accept()
+
 
 class RPAWindow(QMainWindow):
     def __init__(self):
@@ -1332,6 +2325,12 @@ class RPAWindow(QMainWindow):
         inspect_btn.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
         inspect_btn.clicked.connect(self.open_inspector)
         top_bar.addWidget(inspect_btn)
+        
+        # 条码转换
+        barcode_btn = QPushButton("📷 条码转换")
+        barcode_btn.setStyleSheet("background-color: #FF5722; color: white; font-weight: bold;")
+        barcode_btn.clicked.connect(self.open_barcode_converter)
+        top_bar.addWidget(barcode_btn)
         
         top_bar.addStretch()
         main_page_layout.addLayout(top_bar)
@@ -1487,6 +2486,12 @@ class RPAWindow(QMainWindow):
         self.cpu_label = QLabel("CPU: --")
         self.cpu_label.setStyleSheet("color: blue; font-weight: bold;")
         self.status_layout.addWidget(self.cpu_label)
+        
+        # 鼠标坐标显示
+        self.mouse_pos_label = QLabel("鼠标: --")
+        self.mouse_pos_label.setStyleSheet("color: #666; font-weight: bold; padding: 0 10px;")
+        self.status_layout.addWidget(self.mouse_pos_label)
+        
         main_layout.addLayout(self.status_layout)
         
         # 超时计时器
@@ -1510,6 +2515,11 @@ class RPAWindow(QMainWindow):
         self.hotkey_timer = QTimer()
         self.hotkey_timer.timeout.connect(self.check_hotkey)
         self.hotkey_timer.start(100)
+        
+        # 鼠标坐标轮询
+        self.mouse_timer = QTimer()
+        self.mouse_timer.timeout.connect(self.update_mouse_pos)
+        self.mouse_timer.start(50)  # 每50毫秒更新一次
 
     def update_hotkey_display(self, text):
         try:
@@ -1527,6 +2537,18 @@ class RPAWindow(QMainWindow):
                 self.start_task()
             self.hotkey_timer.stop()
             QTimer.singleShot(500, lambda: self.hotkey_timer.start(100))
+    
+    def update_mouse_pos(self):
+        """更新鼠标坐标显示"""
+        try:
+            x, y = pyautogui.position()
+            self.mouse_pos_label.setText(f"鼠标: ({x}, {y})")
+        except:
+            pass
+    
+    def mouseMoveEvent(self, event):
+        """捕获鼠标移动事件（保留备用）"""
+        super().mouseMoveEvent(event)
 
     def update_timeout_status(self):
         """更新超时状态显示"""
@@ -1956,6 +2978,18 @@ class RPAWindow(QMainWindow):
         """打开控件检测窗口"""
         self.inspector_window = InspectorWindow()
         self.inspector_window.show()
+
+    def open_parallel_manager(self):
+        """打开多任务并行管理器"""
+        from parallel_manager import ParallelTaskManager
+        self.parallel_window = ParallelTaskManager()
+        self.parallel_window.show()
+
+    def open_barcode_converter(self):
+        """打开条码转换窗口"""
+        from barcode_converter import BarcodeConverterWindow
+        self.barcode_window = BarcodeConverterWindow()
+        self.barcode_window.show()
 
     def del_response_step(self, row_widget):
         """删除应对步骤"""

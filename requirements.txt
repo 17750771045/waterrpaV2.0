@@ -1,0 +1,9 @@
+PySide6>=6.0.0
+pyautogui>=0.9.0
+pyperclip>=1.8.0
+Pillow>=9.0.0
+opencv-python>=4.5.0
+numpy>=1.20.0
+pywin32>=300
+psutil>=5.8.0
+dxcam>=0.1.0

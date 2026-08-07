@@ -1,0 +1,88 @@
+[
+  {
+    "type": "mouse",
+    "x": 29,
+    "y": 1069,
+    "action": "左键单击",
+    "interval": 90,
+    "timestamp": "15:53:07"
+  },
+  {
+    "type": "mouse",
+    "x": 294,
+    "y": 403,
+    "action": "左键单击",
+    "interval": 399,
+    "timestamp": "15:53:11"
+  },
+  {
+    "type": "mouse",
+    "x": 1508,
+    "y": 792,
+    "action": "左键单击",
+    "interval": 1366,
+    "timestamp": "15:53:14"
+  },
+  {
+    "type": "mouse",
+    "x": 1795,
+    "y": 784,
+    "action": "左键单击",
+    "interval": 82,
+    "timestamp": "15:53:17"
+  },
+  {
+    "type": "mouse",
+    "x": 1473,
+    "y": 790,
+    "action": "左键单击",
+    "interval": 114,
+    "timestamp": "15:53:18"
+  },
+  {
+    "type": "mouse",
+    "x": 1800,
+    "y": 851,
+    "action": "左键单击",
+    "interval": 338,
+    "timestamp": "15:53:20"
+  },
+  {
+    "type": "mouse",
+    "x": 1572,
+    "y": 516,
+    "action": "左键单击",
+    "interval": 136,
+    "timestamp": "15:53:22"
+  },
+  {
+    "type": "mouse",
+    "x": 1819,
+    "y": 242,
+    "action": "左键单击",
+    "interval": 975,
+    "timestamp": "15:53:25"
+  },
+  {
+    "type": "keyboard",
+    "key": "VK_256",
+    "interval": 551,
+    "timestamp": "15:53:26"
+  },
+  {
+    "type": "mouse",
+    "x": 599,
+    "y": 959,
+    "action": "左键单击",
+    "interval": 2704,
+    "timestamp": "15:53:32"
+  },
+  {
+    "type": "mouse",
+    "x": 805,
+    "y": 283,
+    "action": "左键单击",
+    "interval": 271,
+    "timestamp": "15:53:36"
+  }
+]

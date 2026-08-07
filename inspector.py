@@ -2,55 +2,300 @@
 控件检测模块
 负责处理控件检测相关的功能，包括窗口控件获取、控件操作和操作记录
 """
-
 import os
+import re
 import time
+import ctypes
 import pyautogui
 import pyperclip
 import win32gui
 import win32con
 import win32process
-
-try:
-    import psutil
-    HAS_PSUTIL = True
-except ImportError:
-    HAS_PSUTIL = False
+import win32api
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit, 
-    QListWidget, QListWidgetItem, QMessageBox, QInputDialog, QGroupBox, QLabel
+    QListWidget, QListWidgetItem, QMessageBox, QInputDialog, QGroupBox, QLabel,
+    QSpinBox, QCheckBox, QApplication, QFileDialog
 )
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QPainter, QPen, QBrush, QColor
+from PySide6.QtCore import Qt, QTimer, QThread, Signal
+from PySide6.QtGui import QPainter, QPen, QBrush, QColor, QTextCursor
+
+# ctypes 定义
+user32 = ctypes.WinDLL('user32', use_last_error=True)
+kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+
+WH_MOUSE_LL = 14
+WH_KEYBOARD_LL = 13
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+WM_RBUTTONDOWN = 0x0204
+WM_RBUTTONUP = 0x0205
+WM_MBUTTONDOWN = 0x0207
+WM_MBUTTONUP = 0x0208
+WM_MOUSEMOVE = 0x0200
+WM_MOUSEWHEEL = 0x020A
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+WM_SYSKEYDOWN = 0x0104
+WM_QUIT = 0x0012
+WM_HOTKEY = 0x0312
+VK_F1 = 0x70
+VK_BACK = 0x08
+VK_TAB = 0x09
+VK_RETURN = 0x0D
+VK_SHIFT = 0x10
+VK_CONTROL = 0x11
+VK_MENU = 0x12
+VK_CAPITAL = 0x14
+VK_ESCAPE = 0x1B
+VK_SPACE = 0x20
+VK_DELETE = 0x2E
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
+MOD_NOREPEAT = 0x4000
+PM_REMOVE = 1
+
+# 使用正确的 ctypes 类型
+from ctypes import wintypes
+HMODULE = wintypes.HMODULE
+DWORD = wintypes.DWORD
+LONG = ctypes.c_long
+WPARAM = wintypes.WPARAM
+LPARAM = wintypes.LPARAM
+HHOOK = ctypes.c_void_p
+HRESULT = ctypes.HRESULT
+LPCSTR = ctypes.c_char_p
+HWND = wintypes.HWND
+UINT = ctypes.c_uint
+
+HOOKPROC = ctypes.WINFUNCTYPE(LONG, ctypes.c_int, WPARAM, LPARAM)
+
+user32.SetWindowsHookExA.argtypes = [ctypes.c_int, HOOKPROC, HMODULE, DWORD]
+user32.SetWindowsHookExA.restype = HHOOK
+
+user32.CallNextHookEx.argtypes = [HHOOK, ctypes.c_int, WPARAM, LPARAM]
+user32.CallNextHookEx.restype = LONG
+
+user32.UnhookWindowsHookEx.argtypes = [HHOOK]
+user32.UnhookWindowsHookEx.restype = ctypes.c_bool
+
+user32.GetMessageA.argtypes = [ctypes.POINTER(wintypes.MSG), HWND, UINT, UINT]
+user32.GetMessageA.restype = ctypes.c_int
+
+user32.DispatchMessageA.argtypes = [ctypes.POINTER(wintypes.MSG)]
+user32.DispatchMessageA.restype = LONG
+
+user32.PostQuitMessage.argtypes = [ctypes.c_int]
+user32.PostQuitMessage.restype = None
+
+user32.PostThreadMessageA.argtypes = [DWORD, UINT, WPARAM, LPARAM]
+user32.PostThreadMessageA.restype = ctypes.c_bool
+
+user32.RegisterHotKey.argtypes = [HWND, ctypes.c_int, UINT, UINT]
+user32.RegisterHotKey.restype = ctypes.c_int
+
+user32.UnregisterHotKey.argtypes = [HWND, ctypes.c_int]
+user32.UnregisterHotKey.restype = ctypes.c_int
+
+user32.PeekMessageA.argtypes = [ctypes.POINTER(wintypes.MSG), HWND, UINT, UINT, UINT]
+user32.PeekMessageA.restype = ctypes.c_int
+
+user32.GetKeyState.argtypes = [ctypes.c_int]
+user32.GetKeyState.restype = ctypes.c_short
+
+kernel32.GetCurrentThreadId.argtypes = []
+kernel32.GetCurrentThreadId.restype = DWORD
+
+kernel32.GetModuleHandleA.argtypes = [LPCSTR]
+kernel32.GetModuleHandleA.restype = HMODULE
+
+# 特殊键名映射
+SPECIAL_KEYS = {
+    VK_BACK: '退格',
+    VK_TAB: 'Tab',
+    VK_RETURN: '回车',
+    VK_SHIFT: 'Shift',
+    VK_CONTROL: 'Ctrl',
+    VK_MENU: 'Alt',
+    VK_CAPITAL: 'CapsLock',
+    VK_ESCAPE: 'Esc',
+    VK_SPACE: '空格',
+    VK_DELETE: 'Delete',
+    VK_LWIN: '左Win',
+    VK_RWIN: '右Win',
+}
+
+# 排除的按键（功能键等系统键）
+EXCLUDED_KEYS = set(range(0x70, 0x88))  # F1-F24
 
 
-class HighlightWindow(QWidget):
-    """控件高亮窗口"""
-    def __init__(self, rect):
-        super().__init__()
-        self.rect = rect
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_DeleteOnClose)
-        
-        # 设置窗口位置和大小
-        self.setGeometry(rect[0], rect[1], rect[2], rect[3])
+class RecorderThread(QThread):
+    """记录器线程 - 同时记录鼠标和键盘"""
+    record_signal = Signal(dict)
+    stop_signal = Signal()
     
-    def paintEvent(self, event):
-        """绘制高亮边框"""
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
+    HOTKEY_ID = 1
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.running = False
+        self.mouse_hook = None
+        self.keyboard_hook = None
+        self.mouse_callback = None
+        self.keyboard_callback = None
+        self.last_time = 0
+        self.thread_id = None
+        self.pressed_keys = set()
         
-        # 绘制红色边框
-        pen = QPen(QColor(255, 0, 0), 3)
-        painter.setPen(pen)
-        painter.drawRect(1, 1, self.width()-2, self.height()-2)
+    def run(self):
+        """线程主循环"""
+        self.running = True
+        self.thread_id = kernel32.GetCurrentThreadId()
+        self.last_time = time.time()
         
-        # 绘制半透明背景
-        brush = QBrush(QColor(255, 0, 0, 30))
-        painter.setBrush(brush)
-        painter.drawRect(0, 0, self.width(), self.height())
+        try:
+            self.mouse_callback = HOOKPROC(self.mouse_hook_proc)
+            self.mouse_hook = user32.SetWindowsHookExA(
+                WH_MOUSE_LL,
+                self.mouse_callback,
+                kernel32.GetModuleHandleA(None),
+                0
+            )
+            
+            self.keyboard_callback = HOOKPROC(self.keyboard_hook_proc)
+            self.keyboard_hook = user32.SetWindowsHookExA(
+                WH_KEYBOARD_LL,
+                self.keyboard_callback,
+                kernel32.GetModuleHandleA(None),
+                0
+            )
+            
+            if not self.mouse_hook:
+                self.record_signal.emit({'type': 'error', 'message': '设置鼠标钩子失败'})
+                return
+            
+            if not self.keyboard_hook:
+                self.record_signal.emit({'type': 'error', 'message': '设置键盘钩子失败'})
+                return
+                
+            self.record_signal.emit({'type': 'status', 'message': '钩子已启动'})
+            
+            user32.RegisterHotKey(None, self.HOTKEY_ID, MOD_NOREPEAT, VK_F1)
+            
+            msg = wintypes.MSG()
+            while self.running:
+                if user32.GetMessageA(ctypes.byref(msg), None, 0, 0) > 0:
+                    if msg.message == WM_HOTKEY and msg.wParam == self.HOTKEY_ID:
+                        self.stop_signal.emit()
+                    else:
+                        user32.DispatchMessageA(ctypes.byref(msg))
+                    
+        except Exception as e:
+            self.record_signal.emit({'type': 'error', 'message': str(e)})
+        finally:
+            user32.UnregisterHotKey(None, self.HOTKEY_ID)
+            if self.mouse_hook:
+                user32.UnhookWindowsHookEx(self.mouse_hook)
+                self.mouse_hook = None
+            if self.keyboard_hook:
+                user32.UnhookWindowsHookEx(self.keyboard_hook)
+                self.keyboard_hook = None
+            self.record_signal.emit({'type': 'status', 'message': '钩子已停止'})
+    
+    def stop(self):
+        """停止记录"""
+        self.running = False
+        if self.thread_id is not None:
+            user32.PostThreadMessageA(self.thread_id, WM_QUIT, 0, 0)
+        
+    def mouse_hook_proc(self, nCode, wParam, lParam):
+        """鼠标钩子回调函数"""
+        if nCode >= 0 and self.running:
+            current_time = time.time()
+            interval = current_time - self.last_time
+            self.last_time = current_time
+            
+            x, y = pyautogui.position()
+            
+            action_type = ''
+            if wParam == WM_LBUTTONDOWN:
+                action_type = '左键单击'
+            elif wParam == WM_RBUTTONDOWN:
+                action_type = '右键单击'
+            elif wParam == WM_MBUTTONDOWN:
+                action_type = '中键单击'
+            else:
+                return user32.CallNextHookEx(self.mouse_hook, nCode, wParam, lParam)
+            
+            if action_type:
+                record = {
+                    'type': 'mouse_action',
+                    'x': x,
+                    'y': y,
+                    'action': action_type,
+                    'interval': round(interval * 1000)
+                }
+                self.record_signal.emit(record)
+        
+        return user32.CallNextHookEx(self.mouse_hook, nCode, wParam, lParam)
+    
+    def keyboard_hook_proc(self, nCode, wParam, lParam):
+        """键盘钩子回调函数"""
+        if nCode >= 0 and self.running:
+            if wParam == WM_KEYDOWN or wParam == WM_SYSKEYDOWN:
+                vk_code = wParam
+                
+                if vk_code in EXCLUDED_KEYS:
+                    return user32.CallNextHookEx(self.keyboard_hook, nCode, wParam, lParam)
+                
+                if vk_code in self.pressed_keys:
+                    return user32.CallNextHookEx(self.keyboard_hook, nCode, wParam, lParam)
+                self.pressed_keys.add(vk_code)
+                
+                current_time = time.time()
+                interval = current_time - self.last_time
+                self.last_time = current_time
+                
+                key_name = self.get_key_name(vk_code)
+                
+                record = {
+                    'type': 'keyboard_action',
+                    'key': key_name,
+                    'vk_code': vk_code,
+                    'interval': round(interval * 1000)
+                }
+                self.record_signal.emit(record)
+            elif wParam == WM_KEYUP or wParam == WM_SYSKEYUP:
+                vk_code = wParam
+                self.pressed_keys.discard(vk_code)
+        
+        return user32.CallNextHookEx(self.keyboard_hook, nCode, wParam, lParam)
+    
+    def get_key_name(self, vk_code):
+        """获取按键名称"""
+        if vk_code in SPECIAL_KEYS:
+            return SPECIAL_KEYS[vk_code]
+        
+        if 0x30 <= vk_code <= 0x39:
+            return str(vk_code - 0x30)
+        
+        if 0x41 <= vk_code <= 0x5A:
+            is_shift = user32.GetKeyState(VK_SHIFT) < 0
+            is_caps = user32.GetKeyState(VK_CAPITAL) & 1
+            char = chr(vk_code)
+            if is_shift != is_caps:
+                return char.upper()
+            return char.lower()
+        
+        if 0x60 <= vk_code <= 0x69:
+            return 'Num' + str(vk_code - 0x60)
+        
+        if 0x6A <= vk_code <= 0x6F:
+            numpad_symbols = {0x6A: '*', 0x6B: '+', 0x6C: 'Num-', 0x6D: '-', 0x6E: '.', 0x6F: '/'}
+            return numpad_symbols.get(vk_code, f'VK_{vk_code}')
+        
+        return f'VK_{vk_code}'
 
 
 class InspectorWindow(QWidget):
@@ -61,604 +306,326 @@ class InspectorWindow(QWidget):
         self.resize(600, 500)
         self.setWindowFlags(Qt.WindowStaysOnTopHint)
         
+        self.recorded_actions = []
+        self.recording = False
+        self.playback_thread = None
+        
         layout = QVBoxLayout()
         
-        # 顶部工具栏
         toolbar = QHBoxLayout()
         
-        # 选择窗口按钮
-        self.select_window_btn = QPushButton("👆 选择窗口")
-        self.select_window_btn.clicked.connect(self.select_target_window)
-        toolbar.addWidget(self.select_window_btn)
+        self.start_record_btn = QPushButton("▶️ 开始记录")
+        self.start_record_btn.clicked.connect(self.start_recording)
+        toolbar.addWidget(self.start_record_btn)
         
-        self.refresh_btn = QPushButton("🔄 刷新")
-        self.refresh_btn.clicked.connect(self.refresh_controls)
-        toolbar.addWidget(self.refresh_btn)
+        self.stop_record_btn = QPushButton("⏹️ 停止记录(F1)")
+        self.stop_record_btn.clicked.connect(self.stop_recording)
+        self.stop_record_btn.setEnabled(False)
+        toolbar.addWidget(self.stop_record_btn)
         
-        self.copy_btn = QPushButton("📋 复制信息")
-        self.copy_btn.clicked.connect(self.copy_control_info)
-        toolbar.addWidget(self.copy_btn)
-        
-        self.highlight_btn = QPushButton("🔦 高亮控件")
-        self.highlight_btn.clicked.connect(self.highlight_control)
-        toolbar.addWidget(self.highlight_btn)
-        
-        # 控件操作按钮
-        self.click_btn = QPushButton("🖱️ 点击控件")
-        self.click_btn.clicked.connect(self.click_control)
-        toolbar.addWidget(self.click_btn)
-        
-        self.double_click_btn = QPushButton("🖱️🖱️ 双击控件")
-        self.double_click_btn.clicked.connect(self.double_click_control)
-        toolbar.addWidget(self.double_click_btn)
-        
-        self.right_click_btn = QPushButton("🖱️🔘 右键点击")
-        self.right_click_btn.clicked.connect(self.right_click_control)
-        toolbar.addWidget(self.right_click_btn)
-        
-        # 文本操作按钮
-        self.input_text_btn = QPushButton("📝 输入文本")
-        self.input_text_btn.clicked.connect(self.input_text_to_control)
-        toolbar.addWidget(self.input_text_btn)
-        
-        self.get_text_btn = QPushButton("📖 获取文本")
-        self.get_text_btn.clicked.connect(self.get_control_text)
-        toolbar.addWidget(self.get_text_btn)
-        
-        self.clear_text_btn = QPushButton("🧹 清空文本")
-        self.clear_text_btn.clicked.connect(self.clear_control_text)
-        toolbar.addWidget(self.clear_text_btn)
-        
-        # 状态操作按钮
-        self.enable_btn = QPushButton("✅ 启用控件")
-        self.enable_btn.clicked.connect(self.enable_control)
-        toolbar.addWidget(self.enable_btn)
-        
-        self.disable_btn = QPushButton("❌ 禁用控件")
-        self.disable_btn.clicked.connect(self.disable_control)
-        toolbar.addWidget(self.disable_btn)
-        
-        self.focus_btn = QPushButton("🎯 聚焦控件")
-        self.focus_btn.clicked.connect(self.focus_control)
-        toolbar.addWidget(self.focus_btn)
-        
-        # 自动化按钮
-        self.record_btn = QPushButton("⏺️ 记录操作")
-        self.record_btn.clicked.connect(self.toggle_recording)
-        self.record_btn.setCheckable(True)
-        toolbar.addWidget(self.record_btn)
-        
-        self.play_btn = QPushButton("▶️ 播放操作")
-        self.play_btn.clicked.connect(self.play_recorded_actions)
+        self.play_btn = QPushButton("🔄 循环播放")
+        self.play_btn.clicked.connect(self.start_playback)
+        self.play_btn.setEnabled(False)
         toolbar.addWidget(self.play_btn)
+        
+        self.stop_play_btn = QPushButton("⏹️ 停止播放(F1)")
+        self.stop_play_btn.clicked.connect(self.stop_playback)
+        self.stop_play_btn.setEnabled(False)
+        toolbar.addWidget(self.stop_play_btn)
+        
+        self.clear_btn = QPushButton("🗑️ 清空记录")
+        self.clear_btn.clicked.connect(self.clear_records)
+        toolbar.addWidget(self.clear_btn)
+        
+        self.save_btn = QPushButton("💾 保存")
+        self.save_btn.clicked.connect(self.save_actions)
+        self.save_btn.setEnabled(False)
+        toolbar.addWidget(self.save_btn)
         
         toolbar.addStretch()
         layout.addLayout(toolbar)
         
-        # 控件信息显示
-        self.info_text = QTextEdit()
-        self.info_text.setReadOnly(True)
-        layout.addWidget(self.info_text)
+        self.steps_list = QListWidget()
+        self.steps_list.itemChanged.connect(self.on_step_edited)
+        layout.addWidget(self.steps_list)
         
-        # 控件列表
-        self.control_list = QListWidget()
-        self.control_list.itemClicked.connect(self.on_control_selected)
-        layout.addWidget(self.control_list)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setMaximumHeight(150)
+        layout.addWidget(self.log_text)
         
         self.setLayout(layout)
         
-        # 目标窗口句柄（手动选择后保存）
-        self.target_hwnd = None
+        self.recorder = RecorderThread()
+        self.recorder.record_signal.connect(self.handle_record)
+        self.recorder.stop_signal.connect(self.stop_recording)
         
-        # 初始化时刷新一次
-        self.refresh_controls()
+    def add_log(self, message):
+        """添加日志"""
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.append(f"[{timestamp}] {message}")
+        cursor = self.log_text.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.log_text.setTextCursor(cursor)
     
-    def select_target_window(self):
-        """手动选择目标窗口"""
-        self.info_text.setText("请在3秒内点击目标窗口...")
-        self.control_list.clear()
+    def start_recording(self):
+        """开始记录"""
+        self.recorded_actions = []
+        self.steps_list.clear()
+        self.recording = True
         
-        # 3秒后获取鼠标位置下的窗口
-        QTimer.singleShot(3000, self.capture_target_window)
-    
-    def capture_target_window(self):
-        """捕获目标窗口"""
-        try:
-            # 获取鼠标位置
-            x, y = pyautogui.position()
-            
-            # 获取鼠标位置下的窗口句柄
-            hwnd = win32gui.WindowFromPoint((x, y))
-            
-            # 获取顶层窗口
-            parent_hwnd = win32gui.GetAncestor(hwnd, win32con.GA_ROOT)
-            
-            # 检查是否是自身窗口
-            if self.is_self_window(parent_hwnd):
-                self.info_text.setText("检测到控件检测器窗口，请重新选择其他窗口")
-                return
-            
-            # 保存目标窗口句柄
-            self.target_hwnd = parent_hwnd
-            
-            # 刷新控件列表
-            self.refresh_controls()
-            
-            # 显示选择成功信息
-            window_info = self.get_window_info(parent_hwnd)
-            if window_info:
-                self.info_text.append(f"✅ 已选择窗口: {window_info['title']}")
-        except Exception as e:
-            self.info_text.setText(f"选择窗口失败: {str(e)}")
-    
-    def get_window_controls(self, hwnd):
-        """获取窗口的所有控件信息"""
-        controls = []
+        self.start_record_btn.setEnabled(False)
+        self.stop_record_btn.setEnabled(True)
+        self.play_btn.setEnabled(False)
+        self.save_btn.setEnabled(False)
         
-        def enum_child_windows(hwnd, lparam):
-            try:
-                # 获取控件类名
-                class_name = win32gui.GetClassName(hwnd)
-                
-                # 获取控件文本
-                text = win32gui.GetWindowText(hwnd)
-                
-                # 获取控件位置和大小
-                rect = win32gui.GetWindowRect(hwnd)
-                x, y, w, h = rect[0], rect[1], rect[2]-rect[0], rect[3]-rect[1]
-                
-                # 获取控件ID
-                ctrl_id = win32gui.GetDlgCtrlID(hwnd)
-                
-                # 获取控件样式
-                style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
-                
-                controls.append({
-                    'hwnd': hwnd,
-                    'class_name': class_name,
-                    'text': text,
-                    'rect': (x, y, w, h),
-                    'ctrl_id': ctrl_id,
-                    'style': style
-                })
-            except Exception as e:
-                pass
-            return True
+        self.add_log("开始记录鼠标和键盘操作...")
+        self.add_log("按 F1 停止记录")
         
-        try:
-            win32gui.EnumChildWindows(hwnd, enum_child_windows, None)
-        except:
-            pass
+        self.recorder.start()
+        self.showMinimized()
+    
+    def stop_recording(self):
+        """停止记录"""
+        self.recording = False
         
-        return controls
-    
-    def get_window_info(self, hwnd):
-        """获取窗口信息"""
-        try:
-            # 获取窗口标题
-            title = win32gui.GetWindowText(hwnd)
-            
-            # 获取窗口类名
-            class_name = win32gui.GetClassName(hwnd)
-            
-            # 获取窗口位置和大小
-            rect = win32gui.GetWindowRect(hwnd)
-            x, y, w, h = rect[0], rect[1], rect[2]-rect[0], rect[3]-rect[1]
-            
-            # 获取进程ID和进程名
-            _, pid = win32process.GetWindowThreadProcessId(hwnd)
-            try:
-                process = psutil.Process(pid)
-                process_name = process.name()
-            except:
-                process_name = "未知"
-            
-            return {
-                'hwnd': hwnd,
-                'title': title,
-                'class_name': class_name,
-                'rect': (x, y, w, h),
-                'pid': pid,
-                'process_name': process_name
-            }
-        except:
-            return None
-    
-    def refresh_controls(self):
-        """刷新控件列表"""
-        try:
-            # 如果已选择目标窗口，使用目标窗口；否则获取鼠标位置下的窗口
-            if self.target_hwnd:
-                parent_hwnd = self.target_hwnd
-            else:
-                # 获取鼠标位置
-                x, y = pyautogui.position()
-                
-                # 获取鼠标位置下的窗口句柄
-                hwnd = win32gui.WindowFromPoint((x, y))
-                
-                # 获取顶层窗口
-                parent_hwnd = win32gui.GetAncestor(hwnd, win32con.GA_ROOT)
-                
-                # 检查是否是自身窗口（控件检测器窗口）
-                if self.is_self_window(parent_hwnd):
-                    self.info_text.setText("检测到控件检测器窗口，请先选择目标窗口或将鼠标移动到其他窗口")
-                    self.control_list.clear()
-                    return
-            
-            # 获取窗口信息
-            window_info = self.get_window_info(parent_hwnd)
-            
-            if window_info:
-                # 获取所有控件（过滤掉自身窗口的控件）
-                controls = self.get_window_controls(parent_hwnd)
-                
-                # 过滤掉控件检测器窗口的控件
-                filtered_controls = self.filter_self_controls(controls)
-                
-                # 更新控件列表
-                self.control_list.clear()
-                for ctrl in filtered_controls:
-                    item_text = f"{ctrl['class_name']} - {ctrl['text']}"
-                    item = QListWidgetItem(item_text)
-                    item.setData(Qt.UserRole, ctrl)
-                    self.control_list.addItem(item)
-                
-                # 显示窗口信息
-                info = f"""窗口信息:
-标题: {window_info['title']}
-类名: {window_info['class_name']}
-位置: ({window_info['rect'][0]}, {window_info['rect'][1]})
-大小: {window_info['rect'][2]}x{window_info['rect'][3]}
-进程: {window_info['process_name']} (PID: {window_info['pid']})
-句柄: 0x{window_info['hwnd']:X}
-
-找到 {len(filtered_controls)} 个控件 (已过滤自身窗口控件)
-"""
-                self.info_text.setText(info)
-            else:
-                self.info_text.setText("未检测到有效窗口")
-                self.control_list.clear()
-                
-        except Exception as e:
-            self.info_text.setText(f"检测错误: {str(e)}")
-    
-    def is_self_window(self, hwnd):
-        """检查窗口是否是控件检测器窗口"""
-        try:
-            # 获取当前进程ID
-            current_pid = os.getpid()
-            
-            # 获取窗口的进程ID
-            _, window_pid = win32process.GetWindowThreadProcessId(hwnd)
-            
-            # 如果窗口属于当前进程，则认为是自身窗口
-            if window_pid == current_pid:
-                return True
-            
-            # 检查窗口标题是否包含控件检测器相关文本
-            window_title = win32gui.GetWindowText(hwnd)
-            if "控件检测器" in window_title or "Inspector" in window_title:
-                return True
-            
-            # 检查窗口类名
-            class_name = win32gui.GetClassName(hwnd)
-            if "QWidget" in class_name and "控件检测器" in window_title:
-                return True
-                
-            return False
-        except:
-            return False
-    
-    def filter_self_controls(self, controls):
-        """过滤掉属于控件检测器窗口的控件"""
-        try:
-            # 获取当前进程ID
-            current_pid = os.getpid()
-            
-            filtered_controls = []
-            for ctrl in controls:
-                try:
-                    # 获取控件所属窗口的进程ID
-                    _, ctrl_pid = win32process.GetWindowThreadProcessId(ctrl['hwnd'])
-                    
-                    # 如果控件不属于当前进程，则保留
-                    if ctrl_pid != current_pid:
-                        filtered_controls.append(ctrl)
-                except:
-                    # 如果获取进程ID失败，也保留该控件
-                    filtered_controls.append(ctrl)
-            
-            return filtered_controls
-        except:
-            return controls
-    
-    def on_control_selected(self, item):
-        """控件被选中时的处理"""
-        control_info = item.data(Qt.UserRole)
-        if control_info:
-            info = f"""控件详细信息:
-类名: {control_info['class_name']}
-文本: {control_info['text']}
-位置: ({control_info['rect'][0]}, {control_info['rect'][1]})
-大小: {control_info['rect'][2]}x{control_info['rect'][3]}
-控件ID: {control_info['ctrl_id']}
-句柄: 0x{control_info['hwnd']:X}
-样式: 0x{control_info['style']:X}
-"""
-            self.info_text.setText(info)
-    
-    def copy_control_info(self):
-        """复制控件信息到剪贴板"""
-        current_item = self.control_list.currentItem()
-        if current_item:
-            control_info = current_item.data(Qt.UserRole)
-            if control_info:
-                info_str = f"""控件信息:
-类名: {control_info['class_name']}
-文本: {control_info['text']}
-位置: ({control_info['rect'][0]}, {control_info['rect'][1]})
-大小: {control_info['rect'][2]}x{control_info['rect'][3]}
-控件ID: {control_info['ctrl_id']}
-句柄: 0x{control_info['hwnd']:X}
-"""
-                pyperclip.copy(info_str)
-                QMessageBox.information(self, "成功", "控件信息已复制到剪贴板")
-        else:
-            QMessageBox.warning(self, "警告", "请先选择一个控件")
-    
-    def highlight_control(self):
-        """高亮显示选中的控件"""
-        current_item = self.control_list.currentItem()
-        if current_item:
-            control_info = current_item.data(Qt.UserRole)
-            if control_info:
-                # 创建高亮窗口
-                self.highlight_window = HighlightWindow(control_info['rect'])
-                self.highlight_window.show()
-                
-                # 3秒后自动关闭高亮
-                QTimer.singleShot(3000, self.highlight_window.close)
-        else:
-            QMessageBox.warning(self, "警告", "请先选择一个控件")
-    
-    def get_selected_control(self):
-        """获取当前选中的控件信息"""
-        current_item = self.control_list.currentItem()
-        if current_item:
-            return current_item.data(Qt.UserRole)
-        return None
-    
-    def click_control(self):
-        """点击控件"""
-        control_info = self.get_selected_control()
-        if control_info:
-            try:
-                # 获取控件中心位置
-                rect = control_info['rect']
-                center_x = rect[0] + rect[2] // 2
-                center_y = rect[1] + rect[3] // 2
-                
-                # 点击控件
-                pyautogui.click(center_x, center_y)
-                self.info_text.append(f"✅ 已点击控件: {control_info['class_name']}")
-                
-                # 记录操作
-                self.record_action('click', control_info)
-            except Exception as e:
-                QMessageBox.warning(self, "错误", f"点击控件失败: {str(e)}")
-        else:
-            QMessageBox.warning(self, "警告", "请先选择一个控件")
-    
-    def double_click_control(self):
-        """双击控件"""
-        control_info = self.get_selected_control()
-        if control_info:
-            try:
-                # 获取控件中心位置
-                rect = control_info['rect']
-                center_x = rect[0] + rect[2] // 2
-                center_y = rect[1] + rect[3] // 2
-                
-                # 双击控件
-                pyautogui.doubleClick(center_x, center_y)
-                self.info_text.append(f"✅ 已双击控件: {control_info['class_name']}")
-                
-                # 记录操作
-                self.record_action('double_click', control_info)
-            except Exception as e:
-                QMessageBox.warning(self, "错误", f"双击控件失败: {str(e)}")
-        else:
-            QMessageBox.warning(self, "警告", "请先选择一个控件")
-    
-    def right_click_control(self):
-        """右键点击控件"""
-        control_info = self.get_selected_control()
-        if control_info:
-            try:
-                # 获取控件中心位置
-                rect = control_info['rect']
-                center_x = rect[0] + rect[2] // 2
-                center_y = rect[1] + rect[3] // 2
-                
-                # 右键点击
-                pyautogui.rightClick(center_x, center_y)
-                self.info_text.append(f"✅ 已右键点击控件: {control_info['class_name']}")
-                
-                # 记录操作
-                self.record_action('right_click', control_info)
-            except Exception as e:
-                QMessageBox.warning(self, "错误", f"右键点击失败: {str(e)}")
-        else:
-            QMessageBox.warning(self, "警告", "请先选择一个控件")
-    
-    def input_text_to_control(self):
-        """向控件输入文本"""
-        control_info = self.get_selected_control()
-        if control_info:
-            try:
-                # 获取输入文本
-                text, ok = QInputDialog.getText(self, "输入文本", "请输入要输入的文本:")
-                if ok and text:
-                    # 先点击控件获取焦点
-                    rect = control_info['rect']
-                    center_x = rect[0] + rect[2] // 2
-                    center_y = rect[1] + rect[3] // 2
-                    pyautogui.click(center_x, center_y)
-                    time.sleep(0.1)
-                    
-                    # 输入文本
-                    pyautogui.write(text)
-                    self.info_text.append(f"✅ 已输入文本到控件: {text}")
-                    
-                    # 记录操作
-                    self.record_action('input', control_info, text=text)
-            except Exception as e:
-                QMessageBox.warning(self, "错误", f"输入文本失败: {str(e)}")
-        else:
-            QMessageBox.warning(self, "警告", "请先选择一个控件")
-    
-    def get_control_text(self):
-        """获取控件文本"""
-        control_info = self.get_selected_control()
-        if control_info:
-            try:
-                # 使用Windows API获取控件文本
-                text = win32gui.GetWindowText(control_info['hwnd'])
-                QMessageBox.information(self, "控件文本", f"控件文本内容:\n{text}")
-                self.info_text.append(f"📖 控件文本: {text}")
-            except Exception as e:
-                QMessageBox.warning(self, "错误", f"获取文本失败: {str(e)}")
-        else:
-            QMessageBox.warning(self, "警告", "请先选择一个控件")
-    
-    def clear_control_text(self):
-        """清空控件文本"""
-        control_info = self.get_selected_control()
-        if control_info:
-            try:
-                # 先点击控件获取焦点
-                rect = control_info['rect']
-                center_x = rect[0] + rect[2] // 2
-                center_y = rect[1] + rect[3] // 2
-                pyautogui.click(center_x, center_y)
-                time.sleep(0.1)
-                
-                # 全选并删除
-                pyautogui.hotkey('ctrl', 'a')
-                time.sleep(0.1)
-                pyautogui.press('delete')
-                
-                self.info_text.append(f"✅ 已清空控件文本")
-            except Exception as e:
-                QMessageBox.warning(self, "错误", f"清空文本失败: {str(e)}")
-        else:
-            QMessageBox.warning(self, "警告", "请先选择一个控件")
-    
-    def enable_control(self):
-        """启用控件"""
-        control_info = self.get_selected_control()
-        if control_info:
-            try:
-                # 启用控件
-                win32gui.EnableWindow(control_info['hwnd'], True)
-                self.info_text.append(f"✅ 已启用控件: {control_info['class_name']}")
-            except Exception as e:
-                QMessageBox.warning(self, "错误", f"启用控件失败: {str(e)}")
-        else:
-            QMessageBox.warning(self, "警告", "请先选择一个控件")
-    
-    def disable_control(self):
-        """禁用控件"""
-        control_info = self.get_selected_control()
-        if control_info:
-            try:
-                # 禁用控件
-                win32gui.EnableWindow(control_info['hwnd'], False)
-                self.info_text.append(f"✅ 已禁用控件: {control_info['class_name']}")
-            except Exception as e:
-                QMessageBox.warning(self, "错误", f"禁用控件失败: {str(e)}")
-        else:
-            QMessageBox.warning(self, "警告", "请先选择一个控件")
-    
-    def focus_control(self):
-        """聚焦控件"""
-        control_info = self.get_selected_control()
-        if control_info:
-            try:
-                # 聚焦控件
-                win32gui.SetFocus(control_info['hwnd'])
-                self.info_text.append(f"✅ 已聚焦控件: {control_info['class_name']}")
-            except Exception as e:
-                QMessageBox.warning(self, "错误", f"聚焦控件失败: {str(e)}")
-        else:
-            QMessageBox.warning(self, "警告", "请先选择一个控件")
-    
-    def toggle_recording(self):
-        """切换操作记录状态"""
-        if not hasattr(self, 'recording_actions'):
-            self.recording_actions = []
-            self.recording_start_time = time.time()
+        if self.recorder.isRunning():
+            self.recorder.stop()
+            if not self.recorder.wait(3000):
+                self.recorder.terminate()
+                self.recorder.wait()
         
-        if self.record_btn.isChecked():
-            # 开始记录
-            self.recording_actions = []
-            self.recording_start_time = time.time()
-            self.record_btn.setText("⏹️ 停止记录")
-            self.info_text.append("⏺️ 开始记录操作...")
-        else:
-            # 停止记录
-            self.record_btn.setText("⏺️ 记录操作")
-            duration = time.time() - self.recording_start_time
-            self.info_text.append(f"⏹️ 停止记录，共记录 {len(self.recording_actions)} 个操作，耗时 {duration:.1f} 秒")
+        self.start_record_btn.setEnabled(True)
+        self.stop_record_btn.setEnabled(False)
+        self.play_btn.setEnabled(len(self.recorded_actions) > 0)
+        self.save_btn.setEnabled(len(self.recorded_actions) > 0)
+        
+        self.add_log(f"停止记录，共记录 {len(self.recorded_actions)} 个操作")
+        
+        self.showNormal()
+        self.raise_()
     
-    def play_recorded_actions(self):
-        """播放记录的操作"""
-        if not hasattr(self, 'recording_actions') or not self.recording_actions:
-            QMessageBox.warning(self, "警告", "没有记录的操作可以播放")
+    def clear_records(self):
+        """清空记录"""
+        self.recorded_actions = []
+        self.steps_list.clear()
+        self.play_btn.setEnabled(False)
+        self.stop_play_btn.setEnabled(False)
+        self.save_btn.setEnabled(False)
+        self.add_log("已清空所有记录")
+    
+    def save_actions(self):
+        """保存记录的动作到文件"""
+        import json
+        from datetime import datetime
+        
+        if not self.recorded_actions:
+            QMessageBox.warning(self, "警告", "没有记录的操作可以保存")
+            return
+        
+        default_name = datetime.now().strftime("control_actions_%Y%m%d_%H%M%S.json")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存控件操作", default_name, "JSON文件 (*.json)"
+        )
+        if not path:
             return
         
         try:
-            self.info_text.append("▶️ 开始播放记录的操作...")
-            
-            for i, action in enumerate(self.recording_actions):
-                action_type = action.get('type', '')
-                control_info = action.get('control', {})
-                
-                if action_type == 'click':
-                    rect = control_info.get('rect', (0, 0, 0, 0))
-                    center_x = rect[0] + rect[2] // 2
-                    center_y = rect[1] + rect[3] // 2
-                    pyautogui.click(center_x, center_y)
-                    self.info_text.append(f"   {i+1}. 点击: {control_info.get('class_name', '')}")
-                
-                elif action_type == 'input':
-                    text = action.get('text', '')
-                    rect = control_info.get('rect', (0, 0, 0, 0))
-                    center_x = rect[0] + rect[2] // 2
-                    center_y = rect[1] + rect[3] // 2
-                    pyautogui.click(center_x, center_y)
-                    time.sleep(0.1)
-                    pyautogui.write(text)
-                    self.info_text.append(f"   {i+1}. 输入: {text}")
-                
-                time.sleep(0.5)  # 操作间隔
-            
-            self.info_text.append("✅ 操作播放完成")
-            
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(self.recorded_actions, f, ensure_ascii=False, indent=2)
+            self.add_log(f"已保存 {len(self.recorded_actions)} 个操作到: {path}")
+            QMessageBox.information(self, "保存成功", f"已保存 {len(self.recorded_actions)} 个操作到:\n{path}")
         except Exception as e:
-            QMessageBox.warning(self, "错误", f"播放操作失败: {str(e)}")
+            self.add_log(f"保存失败: {str(e)}")
+            QMessageBox.critical(self, "保存失败", f"保存失败:\n{str(e)}")
     
-    def record_action(self, action_type, control_info, **kwargs):
-        """记录操作（供其他方法调用）"""
-        if hasattr(self, 'recording_actions') and self.record_btn.isChecked():
-            action = {
-                'type': action_type,
-                'control': control_info,
-                'timestamp': time.time() - self.recording_start_time
-            }
-            action.update(kwargs)
-            self.recording_actions.append(action)
+    def handle_record(self, record):
+        """处理记录信号"""
+        timestamp = time.strftime("%H:%M:%S")
+        
+        if record['type'] == 'mouse_action':
+            x = record['x']
+            y = record['y']
+            action = record['action']
+            interval = record['interval']
+            
+            self.recorded_actions.append({
+                'type': 'mouse',
+                'x': x,
+                'y': y,
+                'action': action,
+                'interval': interval,
+                'timestamp': timestamp
+            })
+            
+            step_text = f"{len(self.recorded_actions)}. [{timestamp}] [{interval}ms] 🖱️ {action} ({x}, {y})"
+            item = QListWidgetItem(step_text)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+            self.steps_list.addItem(item)
+            self.add_log(f"记录鼠标: {action} ({x}, {y})")
+            
+        elif record['type'] == 'keyboard_action':
+            key = record['key']
+            interval = record['interval']
+            
+            self.recorded_actions.append({
+                'type': 'keyboard',
+                'key': key,
+                'interval': interval,
+                'timestamp': timestamp
+            })
+            
+            step_text = f"{len(self.recorded_actions)}. [{timestamp}] [{interval}ms] ⌨️ 按键: {key}"
+            item = QListWidgetItem(step_text)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+            self.steps_list.addItem(item)
+            self.add_log(f"记录键盘: {key}")
+            
+        elif record['type'] == 'status':
+            self.add_log(record['message'])
+            
+        elif record['type'] == 'error':
+            self.add_log(f"错误: {record['message']}")
+    
+    def on_step_edited(self, item):
+        """步骤编辑后同步到 recorded_actions"""
+        row = self.steps_list.row(item)
+        if row < 0 or row >= len(self.recorded_actions):
+            return
+        text = item.text()
+        
+        if '🖱️' in text:
+            m = re.match(r'\d+\. \[(\d{2}:\d{2}:\d{2})\] \[(\d+)ms\] 🖱️ (.+) \((\d+), (\d+)\)', text)
+            if m:
+                self.recorded_actions[row] = {
+                    'type': 'mouse',
+                    'x': int(m.group(4)),
+                    'y': int(m.group(5)),
+                    'action': m.group(3),
+                    'interval': int(m.group(2)),
+                    'timestamp': m.group(1)
+                }
+                self.add_log(f"步骤 {row+1} 已更新: {m.group(3)} ({m.group(4)}, {m.group(5)})")
+        
+        elif '⌨️' in text:
+            m = re.match(r'\d+\. \[(\d{2}:\d{2}:\d{2})\] \[(\d+)ms\] ⌨️ 按键: (.+)', text)
+            if m:
+                self.recorded_actions[row] = {
+                    'type': 'keyboard',
+                    'key': m.group(3),
+                    'interval': int(m.group(2)),
+                    'timestamp': m.group(1)
+                }
+                self.add_log(f"步骤 {row+1} 已更新: 按键 {m.group(3)}")
+    
+    def start_playback(self):
+        """开始循环播放"""
+        if not self.recorded_actions:
+            QMessageBox.warning(self, "警告", "没有记录的操作可以播放")
+            return
+        
+        self.play_btn.setEnabled(False)
+        self.stop_play_btn.setEnabled(True)
+        self.start_record_btn.setEnabled(False)
+        
+        self.add_log("开始循环播放...")
+        
+        self.playback_thread = PlaybackThread(self.recorded_actions)
+        self.playback_thread.finished.connect(self.on_playback_finished)
+        self.playback_thread.start()
+    
+    def stop_playback(self):
+        """停止播放"""
+        if self.playback_thread and self.playback_thread.isRunning():
+            self.playback_thread.stop()
+            self.playback_thread.wait(2000)
+            self.on_playback_finished()
+            self.add_log("已停止播放")
+    
+    def on_playback_finished(self):
+        """播放完成"""
+        self.play_btn.setEnabled(True)
+        self.stop_play_btn.setEnabled(False)
+        self.start_record_btn.setEnabled(True)
+    
+    def keyPressEvent(self, event):
+        """键盘事件处理"""
+        if event.key() == Qt.Key_F1:
+            if self.recording:
+                self.stop_recording()
+            elif self.playback_thread and self.playback_thread.isRunning():
+                self.stop_playback()
+            return
+        super().keyPressEvent(event)
+
+
+class PlaybackThread(QThread):
+    """播放线程"""
+    finished = Signal()
+    
+    HOTKEY_ID = 2
+    
+    def __init__(self, actions):
+        super().__init__()
+        self.actions = actions
+        self.running = False
+        self.thread_id = None
+    
+    def stop(self):
+        """停止播放"""
+        self.running = False
+        if self.thread_id is not None:
+            user32.PostThreadMessageA(self.thread_id, WM_QUIT, 0, 0)
+    
+    def run(self):
+        """执行播放"""
+        self.running = True
+        self.thread_id = kernel32.GetCurrentThreadId()
+        user32.RegisterHotKey(None, self.HOTKEY_ID, MOD_NOREPEAT, VK_F1)
+        
+        msg = wintypes.MSG()
+        try:
+            while self.running:
+                for action in self.actions:
+                    if not self.running:
+                        break
+                    
+                    remaining = action['interval'] / 1000.0 if action['interval'] > 0 else 0
+                    while remaining > 0 and self.running:
+                        time.sleep(min(0.05, remaining))
+                        remaining -= 0.05
+                        while user32.PeekMessageA(ctypes.byref(msg), None, WM_HOTKEY, WM_HOTKEY, PM_REMOVE):
+                            if msg.wParam == self.HOTKEY_ID:
+                                self.running = False
+                    
+                    if not self.running:
+                        break
+                    
+                    if action['type'] == 'mouse':
+                        x, y = action['x'], action['y']
+                        action_type = action['action']
+                        
+                        if action_type == '左键单击':
+                            pyautogui.click(x, y)
+                        elif action_type == '右键单击':
+                            pyautogui.rightClick(x, y)
+                        elif action_type == '中键单击':
+                            pyautogui.middleClick(x, y)
+                        
+                    elif action['type'] == 'keyboard':
+                        key = action['key']
+                        pyautogui.press(key)
+                
+                if self.running:
+                    for _ in range(20):
+                        if not self.running:
+                            break
+                        time.sleep(0.05)
+                        while user32.PeekMessageA(ctypes.byref(msg), None, WM_HOTKEY, WM_HOTKEY, PM_REMOVE):
+                            if msg.wParam == self.HOTKEY_ID:
+                                self.running = False
+        finally:
+            user32.UnregisterHotKey(None, self.HOTKEY_ID)
 
 
 def create_inspector_window():
